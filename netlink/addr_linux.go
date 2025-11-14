@@ -13,10 +13,10 @@ func AddrSubscribe(ctx context.Context, ch chan<- AddrUpdate) error {
 		return err
 	}
 	go func() {
-		defer close(ch)
 		for {
 			select {
 			case <-ctx.Done():
+				close(ch)
 				return
 			case e := <-rawChan:
 				ch <- AddrUpdate{

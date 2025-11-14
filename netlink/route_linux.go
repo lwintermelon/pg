@@ -18,10 +18,10 @@ func RouteSubscribe(ctx context.Context, ch chan<- RouteUpdate) error {
 		return err
 	}
 	go func() {
-		defer close(ch)
 		for {
 			select {
 			case <-ctx.Done():
+				close(ch)
 				return
 			case e := <-rawChan:
 				if e.Dst == nil || e.Gw == nil {

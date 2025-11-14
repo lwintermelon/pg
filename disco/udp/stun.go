@@ -29,7 +29,6 @@ func (rt *stunRoundTripper) roundTrip(ctx context.Context, udpConn *net.UDPConn,
 	rt.init()
 	txID := stun.NewTxID()
 	ch := make(chan stunResponse)
-	defer close(ch)
 	rt.stunResponseMapMutex.Lock()
 	rt.stunResponseMap[string(txID[:])] = ch
 	rt.stunResponseMapMutex.Unlock()
@@ -87,7 +86,6 @@ func (c *stunRoundTripper) recvResponse(b []byte, peerAddr net.Addr) {
 			return
 		}
 		resp := stunResponse{txid: string(txid[:]), addr: addr}
-		defer func() { recover() }()
 		select {
 		case r <- resp:
 		default:

@@ -19,22 +19,27 @@ func AddrSubscribe(ctx context.Context, ch chan<- AddrUpdate) error {
 		return fmt.Errorf("syscall socket: %w", err)
 	}
 	go func() {
-		err := runAddrMsgReadLoop(fd, ch)
+		err := runAddrMsgReadLoop(ctx, fd, ch)
 		if err != nil {
 			slog.Error("AddrSubscribe", "err", fmt.Errorf("msg read loop exited: %w", err))
 		}
 	}()
-	go func() {
-		<-ctx.Done()
-		syscall.Close(fd)
-		close(ch)
-	}()
 	return nil
 }
 
-func runAddrMsgReadLoop(fd int, ch chan<- AddrUpdate) error {
+func runAddrMsgReadLoop(ctx context.Context, fd int, ch chan<- AddrUpdate) error {
 	buf := make([]byte, os.Getpagesize())
 	for {
+		select {
+		case <-ctx.Done():
+			err := syscall.Close(fd)
+			if err != nil {
+				slog.Error("runAddrMsgReadLoop", "err", fmt.Errorf("syscall close: %w", err))
+			}
+			close(ch)
+			return nil
+		default:
+		}
 		n, err := syscall.Read(fd, buf)
 		if err != nil {
 			return fmt.Errorf("syscall read: %w", err)

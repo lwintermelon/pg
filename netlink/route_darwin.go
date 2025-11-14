@@ -20,22 +20,27 @@ func RouteSubscribe(ctx context.Context, ch chan<- RouteUpdate) error {
 		return fmt.Errorf("syscall socket: %w", err)
 	}
 	go func() {
-		err := runRouteMsgReadLoop(fd, ch)
+		err := runRouteMsgReadLoop(ctx, fd, ch)
 		if err != nil {
 			slog.Error("RouteSubscribe", "err", fmt.Errorf("msg read loop exited: %w", err))
 		}
 	}()
-	go func() {
-		<-ctx.Done()
-		syscall.Close(fd)
-		close(ch)
-	}()
 	return nil
 }
 
-func runRouteMsgReadLoop(fd int, ch chan<- RouteUpdate) error {
+func runRouteMsgReadLoop(ctx context.Context, fd int, ch chan<- RouteUpdate) error {
 	buf := make([]byte, os.Getpagesize())
 	for {
+		select {
+		case <-ctx.Done():
+			err := syscall.Close(fd)
+			if err != nil {
+				slog.Error("runRouteMsgReadLoop", "err", fmt.Errorf("syscall close: %w", err))
+			}
+			close(ch)
+			return nil
+		default:
+		}
 		n, err := syscall.Read(fd, buf)
 		if err != nil {
 			return fmt.Errorf("syscall read: %w", err)

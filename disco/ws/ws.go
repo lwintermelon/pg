@@ -100,9 +100,6 @@ func (c *WSConn) Write(p []byte) (n int, err error) {
 func (c *WSConn) Close() error {
 	c.closed.Store(true)
 	close(c.closedSig)
-	close(c.datagrams)
-	close(c.events)
-	close(c.connData)
 	close(c.connEOF)
 	if conn := c.rawConn.Load(); conn != nil {
 		_ = conn.WriteControl(websocket.CloseMessage,

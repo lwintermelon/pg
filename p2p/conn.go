@@ -145,9 +145,9 @@ func (c *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 func (c *PacketConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closeChan)
-		c.deadlineRead.Close()
-		c.udpConn.Close()
-		c.wsConn.Close()
+		_ = c.deadlineRead.Close()
+		_ = c.udpConn.Close()
+		_ = c.wsConn.Close()
 	})
 	return nil
 }

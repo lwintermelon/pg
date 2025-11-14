@@ -47,17 +47,17 @@ func (vpn *VPN) Run(ctx context.Context, nic *nic.VirtualNIC, packetConn net.Pac
 	var wg sync.WaitGroup
 	wg.Add(5)
 	go vpn.routingTableUpdate(ctx, &wg)
-	go vpn.nicRead(&wg, nic)
-	go vpn.nicWrite(&wg, nic)
-	go vpn.packetConnRead(&wg, packetConn)
-	go vpn.packetConnWrite(&wg, packetConn)
+	go vpn.nicRead(ctx, &wg, nic)
+	go vpn.nicWrite(ctx, &wg, nic)
+	go vpn.packetConnRead(ctx, &wg, packetConn)
+	go vpn.packetConnWrite(ctx, &wg, packetConn)
 
 	<-ctx.Done()
 	packetConn.Close()
 	nic.Close()
+	wg.Wait()
 	close(vpn.inbound)
 	close(vpn.outbound)
-	wg.Wait()
 	return nil
 }
 
@@ -83,7 +83,7 @@ func (vpn *VPN) routingTableUpdate(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // nicRead read ip packet from nic device and send to outbound channel
-func (vpn *VPN) nicRead(wg *sync.WaitGroup, nic *nic.VirtualNIC) {
+func (vpn *VPN) nicRead(ctx context.Context, wg *sync.WaitGroup, nic *nic.VirtualNIC) {
 	defer wg.Done()
 	for {
 		packet, err := nic.Read()
@@ -93,12 +93,17 @@ func (vpn *VPN) nicRead(wg *sync.WaitGroup, nic *nic.VirtualNIC) {
 			}
 			panic(err)
 		}
-		vpn.outbound <- packet
+		select {
+		case <-ctx.Done():
+			return
+		case vpn.outbound <- packet:
+		}
+
 	}
 }
 
 // nicWrite read ip packet from inbound channel and write to nic device
-func (vpn *VPN) nicWrite(wg *sync.WaitGroup, vnic *nic.VirtualNIC) {
+func (vpn *VPN) nicWrite(ctx context.Context, wg *sync.WaitGroup, vnic *nic.VirtualNIC) {
 	defer wg.Done()
 	handle := func(pkt *nic.Packet) *nic.Packet {
 		for _, in := range vpn.cfg.InboundHandlers {
@@ -109,22 +114,30 @@ func (vpn *VPN) nicWrite(wg *sync.WaitGroup, vnic *nic.VirtualNIC) {
 		}
 		return pkt
 	}
-	for packet := range vpn.inbound {
-		in := packet
-		if packet = handle(packet); packet == nil {
-			nic.RecyclePacket(in)
-			continue
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case packet, ok := <-vpn.inbound:
+			if !ok {
+				return
+			}
+			in := packet
+			if packet = handle(packet); packet == nil {
+				nic.RecyclePacket(in)
+				continue
+			}
+			err := vnic.Write(packet)
+			if err != nil {
+				slog.Debug("WriteTo nic device", "err", err.Error())
+			}
+			nic.RecyclePacket(packet)
 		}
-		err := vnic.Write(packet)
-		if err != nil {
-			slog.Debug("WriteTo nic device", "err", err.Error())
-		}
-		nic.RecyclePacket(packet)
 	}
 }
 
 // packetConnRead read ip packet from packet conn and send to inbound channel
-func (vpn *VPN) packetConnRead(wg *sync.WaitGroup, packetConn net.PacketConn) {
+func (vpn *VPN) packetConnRead(ctx context.Context, wg *sync.WaitGroup, packetConn net.PacketConn) {
 	defer wg.Done()
 	buf := make([]byte, cmp.Or(vpn.cfg.MTU, (2<<15)-8-40-40)+40)
 	for {
@@ -135,12 +148,17 @@ func (vpn *VPN) packetConnRead(wg *sync.WaitGroup, packetConn net.PacketConn) {
 			}
 			panic(err)
 		}
-		vpn.inbound <- nic.GetPacket(buf[:n])
+
+		select {
+		case <-ctx.Done():
+			return
+		case vpn.inbound <- nic.GetPacket(buf[:n]):
+		}
 	}
 }
 
 // packetConnWrite read ip packet from outbound channel and write to packet conn
-func (vpn *VPN) packetConnWrite(wg *sync.WaitGroup, packetConn net.PacketConn) {
+func (vpn *VPN) packetConnWrite(ctx context.Context, wg *sync.WaitGroup, packetConn net.PacketConn) {
 	defer wg.Done()
 	sendPacketToPeer := func(packet *nic.Packet, srcIP, dstIP net.IP) {
 		defer nic.RecyclePacket(packet)
@@ -167,38 +185,47 @@ func (vpn *VPN) packetConnWrite(wg *sync.WaitGroup, packetConn net.PacketConn) {
 		}
 		return pkt
 	}
-	for packet := range vpn.outbound {
-		out := packet
-		if packet = handle(packet); packet == nil {
-			nic.RecyclePacket(out)
-			continue
-		}
-		pkt := packet.AsBytes()
-		if packet.Ver() == 4 {
-			header, err := ipv4.ParseHeader(pkt)
-			if err != nil {
-				panic(err)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case packet, ok := <-vpn.outbound:
+			if !ok {
+				return
 			}
-			if header.Dst.String() == netlink.Show().IPv4 {
-				vpn.inbound <- packet
+			out := packet
+
+			if packet = handle(packet); packet == nil {
+				nic.RecyclePacket(out)
 				continue
 			}
-			sendPacketToPeer(packet, header.Src, header.Dst)
-			continue
-		}
-		if packet.Ver() == 6 {
-			header, err := ipv6.ParseHeader(pkt)
-			if err != nil {
-				panic(err)
-			}
-			if header.Dst.String() == netlink.Show().IPv6 {
-				vpn.inbound <- packet
+			pkt := packet.AsBytes()
+			if packet.Ver() == 4 {
+				header, err := ipv4.ParseHeader(pkt)
+				if err != nil {
+					panic(err)
+				}
+				if header.Dst.String() == netlink.Show().IPv4 {
+					vpn.inbound <- packet
+					continue
+				}
+				sendPacketToPeer(packet, header.Src, header.Dst)
 				continue
 			}
-			sendPacketToPeer(packet, header.Src, header.Dst)
-			continue
+			if packet.Ver() == 6 {
+				header, err := ipv6.ParseHeader(pkt)
+				if err != nil {
+					panic(err)
+				}
+				if header.Dst.String() == netlink.Show().IPv6 {
+					vpn.inbound <- packet
+					continue
+				}
+				sendPacketToPeer(packet, header.Src, header.Dst)
+				continue
+			}
+			slog.Warn("Received invalid packet", "packet", hex.EncodeToString(pkt))
+			nic.RecyclePacket(packet)
 		}
-		slog.Warn("Received invalid packet", "packet", hex.EncodeToString(pkt))
-		nic.RecyclePacket(packet)
 	}
 }

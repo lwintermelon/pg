@@ -85,13 +85,17 @@ func (p *peerConn) Read(b []byte) (n int, err error) {
 		return
 	}
 
-	wsb, ok := <-p.connData
-	if !ok {
+	select {
+	case <-p.closeChan:
 		return 0, io.EOF
-	}
-	n = copy(b, wsb)
-	if n < len(wsb) {
-		p.connBuf = wsb[n:]
+	case wsb, ok := <-p.connData:
+		if !ok {
+			return 0, io.EOF
+		}
+		n = copy(b, wsb)
+		if n < len(wsb) {
+			p.connBuf = wsb[n:]
+		}
 	}
 	return
 }
@@ -115,7 +119,6 @@ func (p *peerConn) Close() error {
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(2*time.Second))
 		p.conn.Close()
 		close(p.closeChan)
-		close(p.connData)
 		p.broadcastLeave()
 	})
 	return nil
